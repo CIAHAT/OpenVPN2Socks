@@ -13,12 +13,10 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 BLUE='\033[0;34m'
 
-# Monitoring vars
 MONITOR_SERVICE="/usr/local/bin/open2socks-monitor.sh"
 MONITOR_SYSTEMD_SERVICE="/etc/systemd/system/open2socks-monitor.service"
 MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
 MONITOR_CONF_FILE="/etc/openvpn/monitoring.conf"
-
 BACKUP_DIR="/root"
 
 # ------------------------ COMMON FUNCTIONS ------------------------
@@ -118,6 +116,58 @@ function cleanup_all() {
         echo -e "✅ ${GREEN}All configurations deleted successfully.${NC}"
         read -p "Press Enter to return to the main menu..."
     fi
+}
+
+function uninstall_open2socks() {
+    clear
+    echo -e "${RED}=================== WARNING ==================="
+    echo "This will COMPLETELY and IRREVERSIBLY remove:"
+    echo "- All open2socks scripts and binaries"
+    echo "- All OpenVPN/SOCKS configs and systemd units"
+    echo "- All monitoring, log, and backup files"
+    echo "-----------------------------------------------"
+    echo "Type DELETE (all capital) to continue, or anything else to cancel:"
+    read -p "> " confirm
+    if [[ "$confirm" != "DELETE" ]]; then
+        echo "Aborted."
+        sleep 1
+        return
+    fi
+
+    echo "Stopping all open2socks services and timers..."
+    for f in /etc/systemd/system/openvpn-socks-*.service /etc/systemd/system/openvpn-socks-*.timer \
+             /etc/systemd/system/open2socks-monitor.service /etc/systemd/system/open2socks-monitor.timer; do
+        [ -f "$f" ] && sudo systemctl disable --now "$(basename "$f")" 2>/dev/null
+    done
+
+    echo "Removing all scripts from /usr/local/bin/..."
+    for bin in /usr/local/bin/open2socks /usr/local/bin/setup-vpn.sh /usr/local/bin/cleanup-vpn.sh /usr/local/bin/open2socks-monitor.sh; do
+        [ -f "$bin" ] && sudo rm -f "$bin"
+    done
+    find /usr/local/bin/ -maxdepth 1 -type f -name 'open2socks*' -exec sudo rm -f {} \;
+
+    echo "Removing configs and monitoring..."
+    [ -d /etc/openvpn ] && sudo rm -rf /etc/openvpn
+
+    echo "Removing all systemd units/timers related to open2socks..."
+    find /etc/systemd/system/ -maxdepth 1 -type f \
+        \( -name 'openvpn-socks-*.service' -o -name 'openvpn-socks-*.timer' \
+        -o -name 'open2socks-monitor.service' -o -name 'open2socks-monitor.timer' \) \
+        -exec sudo rm -f {} \;
+
+    sudo systemctl daemon-reload
+
+    echo "Removing log file..."
+    sudo rm -f /var/log/open2socks-debug.log
+
+    echo "Removing backup zip files..."
+    sudo rm -f /root/open2socks-backup-*.zip
+
+    echo
+    echo -e "${GREEN}✔️  open2socks and all configs have been COMPLETELY removed."
+    echo -e "${YELLOW}It's recommended to reboot your server now!${NC}"
+    read -p "Press Enter to continue..."
+    exit 0
 }
 
 function add_new_config() {
@@ -522,7 +572,8 @@ function display_main_menu() {
     echo "5. Backup and Restore"
     echo "6. Log management"
     echo "7. Update script from GitHub"
-    echo "8. Exit"
+    echo "8. Uninstall open2socks & remove ALL (danger!)"
+    echo "9. Exit"
     echo -e "${BLUE}---${NC}"
 }
 
@@ -678,6 +729,9 @@ while true; do
             update_script_from_github
             ;;
         8)
+            uninstall_open2socks
+            ;;
+        9)
             echo "Exiting. Goodbye!"
             exit 0
             ;;
