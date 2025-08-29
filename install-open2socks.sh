@@ -26,21 +26,16 @@ for pkg in "${REQUIRED_PACKAGES[@]}"; do
     fi
 done
 
-# 2. Remove broken or conflicting docker/containerd packages if exist
-if dpkg -l | grep -qE 'docker.io|containerd|containerd.io'; then
-    echo "Removing any conflicting docker/containerd/containerd.io packages..."
-    sudo apt-get remove -y docker.io containerd containerd.io runc
-fi
-
-# 3. Install Docker (only if not present)
+# 2. Install Docker (only if not present, do NOT touch any installed docker)
 if ! command -v docker &> /dev/null; then
     echo "Docker not found. Installing Docker using the official script..."
+    sudo apt-get update
     curl -fsSL https://get.docker.com | sh
 else
-    echo "Docker is already installed."
+    echo "Docker is already installed. No action needed."
 fi
 
-# 4. Download all scripts from GitHub repo to /usr/local/bin
+# 3. Download all scripts from GitHub repo to /usr/local/bin
 echo
 echo "Downloading all scripts from GitHub..."
 
