@@ -13,6 +13,12 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 BLUE='\033[0;34m'
 
+# Monitoring vars (default values)
+MONITOR_SERVICE="/usr/local/bin/open2socks-monitor.sh"
+MONITOR_SYSTEMD_SERVICE="/etc/systemd/system/open2socks-monitor.service"
+MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
+MONITOR_CONF_FILE="/etc/openvpn/monitoring.conf"
+
 function log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
@@ -178,7 +184,7 @@ function add_new_config() {
 
 function update_script_from_github() {
     echo -e "${BLUE}Updating all scripts from GitHub...${NC}"
-    FILES=("open2socks" "setup-vpn.sh" "cleanup-vpn.sh")
+    FILES=("open2socks" "setup-vpn.sh" "cleanup-vpn.sh" "open2socks-monitor.sh")
     GITHUB_BASE="https://raw.githubusercontent.com/CIAHAT/OpenVPN2Socks/main"
 
     for FILE in "${FILES[@]}"; do
@@ -186,6 +192,8 @@ function update_script_from_github() {
           && sudo chmod +x "/usr/local/bin/$FILE" \
           && echo "✅ Updated $FILE"
     done
+
+    # Systemd service and timer are managed from within the script
 
     echo -e "${GREEN}All scripts updated from GitHub! Please re-run open2socks if you want to use the new version.${NC}"
     read -p "Press Enter to exit and reload the script..." 
@@ -243,6 +251,98 @@ EOF"
     sleep 1
 }
 
+function monitoring_menu() {
+    local status="OFF"
+    local interval="5"
+    if [ -f "$MONITOR_CONF_FILE" ]; then
+        source "$MONITOR_CONF_FILE"
+    fi
+
+    if systemctl is-enabled --quiet open2socks-monitor.timer 2>/dev/null; then
+        status="ON"
+    fi
+
+    echo -e "${BLUE}--- Monitoring Settings ---${NC}"
+    echo "Status: $status"
+    echo "Current interval: $interval minutes"
+    echo "--------------------------"
+    echo "1. Set monitoring OFF"
+    echo "2. Set monitoring ON"
+    echo "3. Change monitoring interval"
+    echo "4. Go to main menu"
+    read -p "Choose an option: " mchoice
+
+    case "$mchoice" in
+        1)
+            sudo systemctl disable --now open2socks-monitor.timer 2>/dev/null
+            echo "MONITOR_INTERVAL=5" | sudo tee "$MONITOR_CONF_FILE" >/dev/null
+            echo "Monitoring is now OFF."
+            sleep 1
+            ;;
+        2)
+            # Always use last configured interval
+            if [ ! -f "$MONITOR_CONF_FILE" ]; then
+                echo "MONITOR_INTERVAL=5" | sudo tee "$MONITOR_CONF_FILE" >/dev/null
+            fi
+            source "$MONITOR_CONF_FILE"
+            create_monitoring_service_timer "$MONITOR_INTERVAL"
+            sudo systemctl enable --now open2socks-monitor.timer
+            echo "Monitoring is now ON."
+            sleep 1
+            ;;
+        3)
+            read -p "Enter new monitoring interval in minutes: " new_interval
+            if ! [[ "$new_interval" =~ ^[0-9]+$ ]]; then
+                echo "Invalid input."
+                sleep 1
+            else
+                echo "MONITOR_INTERVAL=$new_interval" | sudo tee "$MONITOR_CONF_FILE" >/dev/null
+                create_monitoring_service_timer "$new_interval"
+                sudo systemctl enable --now open2socks-monitor.timer
+                echo "Monitoring interval set to $new_interval minutes and monitoring is ON."
+                sleep 1
+            fi
+            ;;
+        4)
+            return
+            ;;
+        *)
+            echo "Invalid option."
+            sleep 1
+            ;;
+    esac
+}
+
+function create_monitoring_service_timer() {
+    local interval="$1"
+    # Write systemd service file
+    sudo bash -c "cat > $MONITOR_SYSTEMD_SERVICE <<EOF
+[Unit]
+Description=Open2Socks auto-monitoring and auto-restart
+
+[Service]
+Type=oneshot
+ExecStart=$MONITOR_SERVICE
+EOF"
+
+    # Write systemd timer file
+    sudo bash -c "cat > $MONITOR_SYSTEMD_TIMER <<EOF
+[Unit]
+Description=Timer for Open2Socks monitoring
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${interval}min
+Unit=open2socks-monitor.service
+
+[Install]
+WantedBy=timers.target
+EOF"
+
+    sudo chmod +x "$MONITOR_SERVICE"
+    sudo systemctl daemon-reload
+}
+
 function display_main_menu() {
     echo -e "${BLUE}---${NC}"
     echo -e "${CYAN}VPN Manager - Main Menu${NC}"
@@ -268,8 +368,9 @@ function display_main_menu() {
     echo "1. Add new OpenVPN Config"
     echo "2. Manage existing configs"
     echo "3. Clean up ALL configurations"
-    echo "4. Update script from GitHub"
-    echo "5. Exit"
+    echo "4. Monitoring settings"
+    echo "5. Update script from GitHub"
+    echo "6. Exit"
     echo -e "${BLUE}---${NC}"
 }
 
@@ -411,9 +512,12 @@ while true; do
             cleanup_all
             ;;
         4)
-            update_script_from_github
+            monitoring_menu
             ;;
         5)
+            update_script_from_github
+            ;;
+        6)
             echo "Exiting. Goodbye!"
             exit 0
             ;;
