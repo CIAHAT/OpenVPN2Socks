@@ -465,7 +465,20 @@ function restore_backup() {
 
     sudo unzip -o "$zip_path" -d / > /dev/null
     sudo systemctl daemon-reload
-    echo "Restore complete. You may need to re-enable services/timers as needed."
+
+    echo
+    echo "🔄 Recreating and restarting all OpenVPN SOCKS services..."
+
+    # Restart all restored OpenVPN SOCKS systemd units to automatically rebuild Docker containers
+    for svc in /etc/systemd/system/openvpn-socks-*.service; do
+        [ ! -f "$svc" ] && continue
+        port=$(basename "$svc" | sed 's/openvpn-socks-\([0-9]*\)\.service/\1/')
+        echo "Restarting service for port $port ..."
+        sudo systemctl restart "openvpn-socks-$port.service"
+        sleep 1
+    done
+
+    echo "Restore complete. All configs and proxies are up and running!"
 }
 
 # ------------------------ LOG MANAGEMENT ------------------------
