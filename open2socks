@@ -4,11 +4,6 @@ SETUP_SCRIPT="/usr/local/bin/setup-vpn.sh"
 CLEANUP_SCRIPT="/usr/local/bin/cleanup-vpn.sh"
 CONFIG_BASE_DIR="/etc/openvpn/"
 LOG_FILE="/var/log/open2socks-debug.log"
-MONITOR_SERVICE="/usr/local/bin/open2socks-monitor.sh"
-MONITOR_SYSTEMD_SERVICE="/etc/systemd/system/open2socks-monitor.service"
-MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
-MONITOR_CONF_FILE="/etc/openvpn/monitoring.conf"
-BACKUP_DIR="/root"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -18,12 +13,20 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 BLUE='\033[0;34m'
 
+MONITOR_SERVICE="/usr/local/bin/open2socks-monitor.sh"
+MONITOR_SYSTEMD_SERVICE="/etc/systemd/system/open2socks-monitor.service"
+MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
+MONITOR_CONF_FILE="/etc/openvpn/monitoring.conf"
+BACKUP_DIR="/root"
+
+# ------------------------ COMMON FUNCTIONS ------------------------
+
 function log_message() {
     sudo bash -c "echo \"$(date '+%Y-%m-%d %H:%M:%S') - $1\" >> $LOG_FILE"
 }
 
 function error_message() {
-    log_message "Error: $1"
+    log_message "❌ Error: $1"
     echo -e "${RED}Error: $1${NC}"
 }
 
@@ -31,7 +34,7 @@ function check_prerequisites() {
     REQUIRED=("curl" "jq" "zip" "unzip" "docker" "openvpn")
     for pkg in "${REQUIRED[@]}"; do
         if ! command -v $pkg &>/dev/null; then
-            echo -e "Installing '$pkg'..."
+            echo -e "📦 Installing '$pkg'..."
             sudo apt-get update && sudo apt-get install -y $pkg
         fi
     done
@@ -85,6 +88,7 @@ function get_configs_array() {
             if [ -f "${dir}name.txt" ]; then
                 original_file=$(cat "${dir}name.txt")
             fi
+
             local status=$(get_service_status "$port")
             local ip_info="N/A"
             if [[ "$status" == *"Running"* ]]; then
@@ -96,16 +100,20 @@ function get_configs_array() {
     echo -e "$configs"
 }
 
+# ------------------------ VPN FUNCTIONS ------------------------
+
 function cleanup_all() {
-    read -p "Are you sure you want to DELETE ALL configurations (y/n)? " confirm
+    read -p "⚠️ Are you sure you want to DELETE ALL configurations (y/n)? " confirm
     if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-        echo "Deleting all configurations..."
+        echo "---"
+        echo "🧹 Deleting all configurations..."
         local all_ports=$(get_configs_array | cut -d'|' -f2)
         for port in $all_ports; do
+            echo "---"
             echo "Deleting config for port $port..."
             sudo "$CLEANUP_SCRIPT" "$port"
         done
-        echo -e "${GREEN}All configurations deleted successfully.${NC}"
+        echo -e "✅ ${GREEN}All configurations deleted successfully.${NC}"
         read -p "Press Enter to return to the main menu..."
     fi
 }
@@ -155,6 +163,7 @@ function uninstall_open2socks() {
     echo "Removing backup zip files..."
     sudo rm -f /root/open2socks-backup-*.zip
 
+    echo
     echo -e "${GREEN}✔️  open2socks and all configs have been COMPLETELY removed."
     echo -e "${YELLOW}It's recommended to reboot your server now!${NC}"
     read -p "Press Enter to continue..."
@@ -162,7 +171,7 @@ function uninstall_open2socks() {
 }
 
 function add_new_config() {
-    echo "Adding a new OpenVPN configuration..."
+    echo "➡️  Adding a new OpenVPN configuration..."
 
     while true; do
         read -p "1. Enter the full path to your .ovpn file: " OVPN_PATH
@@ -175,7 +184,8 @@ function add_new_config() {
     done
 
     while true; do
-        echo "Currently used ports:"
+        echo "---"
+        echo "💡 Currently used ports:"
         local used_ports=$(get_configs_array | cut -d'|' -f2)
         if [ -n "$used_ports" ]; then
             for p in $used_ports; do
@@ -216,18 +226,162 @@ function add_new_config() {
         VPN_PASS="N/A"
     fi
 
-    echo "Running setup for port ${CYAN}$SOCKS_PORT${NC}..."
+    echo "---"
+    echo -e "🛠️  Running setup for port ${CYAN}$SOCKS_PORT${NC}..."
     sudo "$SETUP_SCRIPT" "$OVPN_PATH" "$SOCKS_PORT" "$VPN_USER" "$VPN_PASS"
     if [ $? -ne 0 ]; then
         error_message "Setup script failed. Please check the logs."
         return
     fi
 
-    echo -e "${GREEN}Configuration for port $SOCKS_PORT has been added and started.${NC}"
+    echo -e "✅ ${GREEN}Configuration for port $SOCKS_PORT has been added and started.${NC}"
+    echo "---"
     read -p "Press Enter to return to the main menu..."
 }
 
-# ------- backup_menu, create_backup, restore_backup, etc. ----------
+function setup_restart_timer() {
+    local port="$1"
+    local service_name="openvpn-socks-$port"
+    local timer_service="openvpn-socks-$port-restart"
+    local timer_unit="/etc/systemd/system/${timer_service}.service"
+    local timer_timer="/etc/systemd/system/${timer_service}.timer"
+
+    echo "Enter restart interval in hours (0 to disable scheduled restart):"
+    read -p "Hours: " interval
+    if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
+        echo "Invalid input. Please enter a number."
+        sleep 1
+        return
+    fi
+    if [ "$interval" -eq 0 ]; then
+        sudo systemctl disable --now "${timer_service}.timer" 2>/dev/null
+        sudo rm -f "$timer_unit" "$timer_timer"
+        sudo systemctl daemon-reload
+        echo "Scheduled restart disabled for port $port."
+        sleep 1
+        return
+    fi
+
+    sudo bash -c "cat > '$timer_unit' <<EOF
+[Unit]
+Description=Scheduled restart for $service_name
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart $service_name.service
+EOF"
+
+    sudo bash -c "cat > '$timer_timer' <<EOF
+[Unit]
+Description=Timer for scheduled restart of $service_name
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=${interval}h
+Unit=${timer_service}.service
+
+[Install]
+WantedBy=timers.target
+EOF"
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now "${timer_service}.timer"
+    echo "Scheduled restart every $interval hours is set for port $port."
+    sleep 1
+}
+
+# ------------------------ MONITORING ------------------------
+
+function monitoring_menu() {
+    local status="OFF"
+    local interval="5"
+    if [ -f "$MONITOR_CONF_FILE" ]; then
+        source "$MONITOR_CONF_FILE"
+    fi
+
+    if systemctl is-enabled --quiet open2socks-monitor.timer 2>/dev/null; then
+        status="ON"
+    fi
+
+    echo -e "${BLUE}--- Monitoring Settings ---${NC}"
+    echo "Status: $status"
+    echo "Current interval: $interval minutes"
+    echo "--------------------------"
+    echo "1. Set monitoring OFF"
+    echo "2. Set monitoring ON"
+    echo "3. Change monitoring interval"
+    echo "4. Go to main menu"
+    read -p "Choose an option: " mchoice
+
+    case "$mchoice" in
+        1)
+            sudo systemctl disable --now open2socks-monitor.timer 2>/dev/null
+            echo "MONITOR_INTERVAL=5" | sudo tee "$MONITOR_CONF_FILE" >/dev/null
+            echo "Monitoring is now OFF."
+            sleep 1
+            ;;
+        2)
+            if [ ! -f "$MONITOR_CONF_FILE" ]; then
+                echo "MONITOR_INTERVAL=5" | sudo tee "$MONITOR_CONF_FILE" >/dev/null
+            fi
+            source "$MONITOR_CONF_FILE"
+            create_monitoring_service_timer "$MONITOR_INTERVAL"
+            sudo systemctl enable --now open2socks-monitor.timer
+            echo "Monitoring is now ON."
+            sleep 1
+            ;;
+        3)
+            read -p "Enter new monitoring interval in minutes: " new_interval
+            if ! [[ "$new_interval" =~ ^[0-9]+$ ]]; then
+                echo "Invalid input."
+                sleep 1
+            else
+                echo "MONITOR_INTERVAL=$new_interval" | sudo tee "$MONITOR_CONF_FILE" >/dev/null
+                create_monitoring_service_timer "$new_interval"
+                sudo systemctl enable --now open2socks-monitor.timer
+                echo "Monitoring interval set to $new_interval minutes and monitoring is ON."
+                sleep 1
+            fi
+            ;;
+        4)
+            return
+            ;;
+        *)
+            echo "Invalid option."
+            sleep 1
+            ;;
+    esac
+}
+
+function create_monitoring_service_timer() {
+    local interval="$1"
+    sudo bash -c "cat > $MONITOR_SYSTEMD_SERVICE <<EOF
+[Unit]
+Description=Open2Socks auto-monitoring and auto-restart
+
+[Service]
+Type=oneshot
+ExecStart=$MONITOR_SERVICE
+EOF"
+
+    sudo bash -c "cat > $MONITOR_SYSTEMD_TIMER <<EOF
+[Unit]
+Description=Timer for Open2Socks monitoring
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=${interval}min
+Unit=open2socks-monitor.service
+
+[Install]
+WantedBy=timers.target
+EOF"
+
+    sudo chmod +x "$MONITOR_SERVICE" 2>/dev/null
+    sudo systemctl daemon-reload
+}
+
+# ------------------------ BACKUP & RESTORE ------------------------
 
 function backup_menu() {
     while true; do
@@ -282,8 +436,6 @@ function create_backup() {
     echo "Backup created at $ZIP_PATH"
     rm -rf "$TMPDIR"
 }
-
-# ------------------- PATCHED RESTORE -------------------
 
 function restore_backup() {
     echo "Enter full path to backup zip file (or leave blank to auto-discover latest):"
@@ -350,9 +502,80 @@ EOF
     echo "Restore complete. All configs and proxies are up and running!"
 }
 
-# ---------- Rest of your existing log_menu, monitoring_menu, etc ----------
+# ------------------------ LOG MANAGEMENT ------------------------
 
-# ... (قرار بده اینجا همون بخش‌هایی که قبلاً داشتی مثل log_menu, monitoring_menu و ...)
+function log_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}--- Log Management ---${NC}"
+        echo "1. Show last 100 lines"
+        echo "2. Search in logs"
+        echo "3. Export log file"
+        echo "4. Clear log file"
+        echo "5. Back to main menu"
+        read -p "Choose an option: " lchoice
+
+        case "$lchoice" in
+            1)
+                echo "Last 100 lines of log:"
+                tail -n 100 "$LOG_FILE"
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                read -p "Enter search term: " st
+                grep --color=auto "$st" "$LOG_FILE" || echo "No results found."
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                target="$HOME/open2socks-exported-log-$(date +%Y%m%d-%H%M%S).log"
+                cp "$LOG_FILE" "$target"
+                echo "Exported to $target"
+                read -p "Press Enter to continue..."
+                ;;
+            4)
+                read -p "Are you sure you want to clear the log file? (y/n): " confirm
+                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                    sudo truncate -s 0 "$LOG_FILE"
+                    echo "Log file cleared."
+                else
+                    echo "Cancelled."
+                fi
+                sleep 1
+                ;;
+            5)
+                break
+                ;;
+            *)
+                echo "Invalid option."
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ------------------------ UPDATE SCRIPT ------------------------
+
+function update_script_from_github() {
+    echo -e "${BLUE}Updating all scripts from GitHub...${NC}"
+    GITHUB_USER="CIAHAT"
+    GITHUB_REPO="OpenVPN2Socks"
+    GITHUB_API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/"
+    GITHUB_RAW_BASE="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/"
+
+    file_list=$(curl -s "$GITHUB_API_URL" | jq -r '.[] | select(.type=="file") | .name')
+
+    for FILE in $file_list; do
+        sudo curl -fsSL "$GITHUB_RAW_BASE$FILE" -o "/usr/local/bin/$FILE"
+        sudo chmod +x "/usr/local/bin/$FILE"
+        echo "✅ Updated $FILE"
+    done
+
+    echo -e "${GREEN}All scripts updated from GitHub! Please re-run open2socks if you want to use the new version.${NC}"
+    read -p "Press Enter to exit and reload the script..."
+    exit 0
+}
+
+# ------------------------ MENUS ------------------------
 
 function display_main_menu() {
     echo -e "${BLUE}---${NC}"
@@ -388,7 +611,127 @@ function display_main_menu() {
     echo -e "${BLUE}---${NC}"
 }
 
-# ----------- MAIN MENU ------------
+function manage_configs() {
+    while true; do
+        clear
+        echo -e "${BLUE}---${NC}"
+        echo -e "${CYAN}Manage Configurations${NC}"
+        echo -e "${BLUE}---${NC}"
+        local configs
+        configs=$(get_configs_array)
+        if [ -z "$configs" ]; then
+            echo "  (No configurations to manage.)"
+            echo -e "${BLUE}---${NC}"
+            read -p "Press Enter to return to the main menu..."
+            return
+        fi
+
+        local i=1
+        while IFS= read -r config_line; do
+            local file_name=$(echo "$config_line" | cut -d'|' -f1)
+            local port=$(echo "$config_line" | cut -d'|' -f2)
+            local status=$(echo "$config_line" | cut -d'|' -f4)
+            echo "$i. File: $file_name | Port: $port | Status: $status"
+            ((i++))
+        done <<< "$configs"
+
+        echo -e "${BLUE}---${NC}"
+        read -p "Select a number to manage, or 'q' to go back: " choice
+
+        if [ "$choice" == "q" ]; then
+            return
+        fi
+
+        local selected_config
+        selected_config=$(echo -e "$configs" | sed -n "${choice}p")
+        if [ -z "$selected_config" ]; then
+            error_message "Invalid selection. Please try again."
+            sleep 1
+            continue
+        fi
+
+        local port=$(echo "$selected_config" | cut -d'|' -f2)
+
+        while true; do
+            clear
+            echo -e "${BLUE}---${NC}"
+            echo -e "${CYAN}Managing Configuration for Port: ${MAGENTA}$port${NC}"
+            echo -e "${BLUE}---${NC}"
+            echo "1. Show logs"
+            echo "2. Restart"
+            echo "3. Stop"
+            echo "4. Start"
+            echo "5. Show Final IP"
+            echo "6. Set schedule restart"
+            echo "7. Delete this configuration"
+            echo "8. Back to manage menu"
+            echo -e "${BLUE}---${NC}"
+            read -p "Enter your choice: " manage_choice
+
+            case "$manage_choice" in
+                1)
+                    echo "---"
+                    echo "Displaying logs for port $port..."
+                    echo "---"
+                    sudo journalctl -u "openvpn-socks-$port.service" -n 50
+                    read -p "Press Enter to continue..."
+                    ;;
+                2)
+                    echo "---"
+                    echo "Restarting service for port $port..."
+                    sudo systemctl restart "openvpn-socks-$port.service"
+                    echo "---"
+                    read -p "Press Enter to continue..."
+                    ;;
+                3)
+                    echo "---"
+                    echo "Stopping service for port $port..."
+                    sudo systemctl stop "openvpn-socks-$port.service"
+                    echo "---"
+                    read -p "Press Enter to continue..."
+                    ;;
+                4)
+                    echo "---"
+                    echo "Starting service for port $port..."
+                    sudo systemctl start "openvpn-socks-$port.service"
+                    echo "---"
+                    read -p "Press Enter to continue..."
+                    ;;
+                5)
+                    echo "---"
+                    echo "Fetching final IP information for port $port..."
+                    local ip_info=$(get_proxy_ip_info "$port")
+                    echo "$ip_info" | jq
+                    echo "---"
+                    read -p "Press Enter to continue..."
+                    ;;
+                6)
+                    setup_restart_timer "$port"
+                    ;;
+                7)
+                    read -p "⚠️ Are you sure you want to DELETE this configuration (y/n)? " confirm
+                    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                        echo "---"
+                        echo "Deleting configuration for port $port..."
+                        sudo "$CLEANUP_SCRIPT" "$port"
+                        echo -e "✅ ${GREEN}Configuration deleted successfully.${NC}"
+                        read -p "Press Enter to return to main menu..."
+                        return
+                    fi
+                    ;;
+                8)
+                    break
+                    ;;
+                *)
+                    error_message "Invalid option. Please try again."
+                    sleep 1
+                    ;;
+            esac
+        done
+    done
+}
+
+# ------------------------ MAIN ------------------------
 
 check_prerequisites
 
