@@ -19,6 +19,9 @@ MONITOR_SYSTEMD_SERVICE="/etc/systemd/system/open2socks-monitor.service"
 MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
 MONITOR_CONF_FILE="/etc/openvpn/monitoring.conf"
 
+BACKUP_DIR="/root"
+BACKUP_FILE="open2socks-backup-$(date +%Y%m%d-%H%M%S).zip"
+
 function log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
@@ -43,6 +46,14 @@ function check_prerequisites() {
     if ! command -v jq &>/dev/null; then
         echo -e "📦 Installing 'jq'..."
         sudo apt-get update && sudo apt-get install -y jq
+    fi
+    if ! command -v zip &>/dev/null; then
+        echo -e "📦 Installing 'zip'..."
+        sudo apt-get update && sudo apt-get install -y zip
+    fi
+    if ! command -v unzip &>/dev/null; then
+        echo -e "📦 Installing 'unzip'..."
+        sudo apt-get update && sudo apt-get install -y unzip
     fi
 }
 
@@ -189,7 +200,6 @@ function update_script_from_github() {
     GITHUB_API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/"
     GITHUB_RAW_BASE="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/"
 
-    # Fetch list of scripts in repo's root (non-recursive)
     file_list=$(curl -s "$GITHUB_API_URL" | jq -r '.[] | select(.type=="file") | .name')
 
     for FILE in $file_list; do
@@ -283,7 +293,6 @@ function monitoring_menu() {
             sleep 1
             ;;
         2)
-            # Always use last configured interval
             if [ ! -f "$MONITOR_CONF_FILE" ]; then
                 echo "MONITOR_INTERVAL=5" | sudo tee "$MONITOR_CONF_FILE" >/dev/null
             fi
@@ -318,7 +327,6 @@ function monitoring_menu() {
 
 function create_monitoring_service_timer() {
     local interval="$1"
-    # Write systemd service file
     sudo bash -c "cat > $MONITOR_SYSTEMD_SERVICE <<EOF
 [Unit]
 Description=Open2Socks auto-monitoring and auto-restart
@@ -328,7 +336,6 @@ Type=oneshot
 ExecStart=$MONITOR_SERVICE
 EOF"
 
-    # Write systemd timer file
     sudo bash -c "cat > $MONITOR_SYSTEMD_TIMER <<EOF
 [Unit]
 Description=Timer for Open2Socks monitoring
@@ -344,6 +351,96 @@ EOF"
 
     sudo chmod +x "$MONITOR_SERVICE" 2>/dev/null
     sudo systemctl daemon-reload
+}
+
+function backup_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}--- Backup and Restore Menu ---${NC}"
+        echo "1. Create backup"
+        echo "2. Restore from backup"
+        echo "3. Go to main menu"
+        read -p "Choose an option: " bchoice
+
+        case "$bchoice" in
+            1)
+                create_backup
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                restore_backup
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                break
+                ;;
+            *)
+                echo "Invalid option."
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+function create_backup() {
+    # Compose file lists
+    TMPDIR=$(mktemp -d)
+    FILES_TO_BACKUP=()
+    # OpenVPN configs
+    if [ -d "$CONFIG_BASE_DIR" ]; then
+        FILES_TO_BACKUP+=("$CONFIG_BASE_DIR")
+    fi
+    # systemd units
+    for f in /etc/systemd/system/openvpn-socks-*.service /etc/systemd/system/openvpn-socks-*.timer /etc/systemd/system/open2socks-monitor.service /etc/systemd/system/open2socks-monitor.timer; do
+        [ -f "$f" ] && FILES_TO_BACKUP+=("$f")
+    done
+    # monitoring config
+    [ -f "$MONITOR_CONF_FILE" ] && FILES_TO_BACKUP+=("$MONITOR_CONF_FILE")
+    # log file
+    [ -f "$LOG_FILE" ] && FILES_TO_BACKUP+=("$LOG_FILE")
+
+    if [ "${#FILES_TO_BACKUP[@]}" -eq 0 ]; then
+        echo "Nothing to backup."
+        rm -rf "$TMPDIR"
+        return
+    fi
+
+    ZIP_PATH="$BACKUP_DIR/open2socks-backup-$(date +%Y%m%d-%H%M%S).zip"
+    sudo zip -r "$ZIP_PATH" "${FILES_TO_BACKUP[@]}" > /dev/null
+    sudo chown $USER:$USER "$ZIP_PATH"
+    echo "Backup created at $ZIP_PATH"
+    rm -rf "$TMPDIR"
+}
+
+function restore_backup() {
+    echo "Enter full path to backup zip file (or leave blank to auto-discover latest):"
+    read -p "Path: " zip_path
+
+    if [ -z "$zip_path" ]; then
+        zip_path=$(ls -t $BACKUP_DIR/open2socks-backup-*.zip 2>/dev/null | head -n1)
+        if [ -z "$zip_path" ]; then
+            echo "No backup file found in $BACKUP_DIR"
+            return
+        else
+            echo "Auto-selected latest backup: $zip_path"
+        fi
+    fi
+
+    if [ ! -f "$zip_path" ]; then
+        echo "File not found: $zip_path"
+        return
+    fi
+
+    echo "⚠️ This will overwrite existing configs and units! Continue? (y/n)"
+    read -p "Continue: " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "Restore cancelled."
+        return
+    fi
+
+    sudo unzip -o "$zip_path" -d / > /dev/null
+    sudo systemctl daemon-reload
+    echo "Restore complete. You may need to re-enable services/timers as needed."
 }
 
 function display_main_menu() {
@@ -372,8 +469,9 @@ function display_main_menu() {
     echo "2. Manage existing configs"
     echo "3. Clean up ALL configurations"
     echo "4. Monitoring settings"
-    echo "5. Update script from GitHub"
-    echo "6. Exit"
+    echo "5. Backup and Restore"
+    echo "6. Update script from GitHub"
+    echo "7. Exit"
     echo -e "${BLUE}---${NC}"
 }
 
@@ -518,9 +616,12 @@ while true; do
             monitoring_menu
             ;;
         5)
-            update_script_from_github
+            backup_menu
             ;;
         6)
+            update_script_from_github
+            ;;
+        7)
             echo "Exiting. Goodbye!"
             exit 0
             ;;
