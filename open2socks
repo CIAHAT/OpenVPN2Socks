@@ -1,2 +1,50 @@
 #!/bin/bash
-echo "Open2Socks Script Works! (Initial Test)"
+
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+function update_script() {
+    echo -e "${BLUE}Downloading latest version from GitHub...${NC}"
+    SCRIPT_PATH=$(realpath "$0")
+    TMP_FILE=$(mktemp)
+    if curl -fsSL "https://raw.githubusercontent.com/CIAHAT/OpenVPN2Socks/main/open2socks" -o "$TMP_FILE"; then
+        sudo mv "$TMP_FILE" "$SCRIPT_PATH"
+        sudo chmod +x "$SCRIPT_PATH"
+        echo -e "${BLUE}✅ Script updated! Please run open2socks again.${NC}"
+        exit 0
+    else
+        echo "❌ Update failed! Check your internet or GitHub access."
+        rm -f "$TMP_FILE"
+    fi
+}
+
+function main_menu() {
+    clear
+    echo -e "${BLUE}====== Open2Socks Main Menu ======${NC}"
+    echo "1. Show Hello Message"
+    echo "2. Update Script (Get latest from GitHub)"
+    echo "3. Exit"
+    echo "-----------------------------------"
+    read -p "Enter your choice: " choice
+    case $choice in
+        1)
+            echo "👋 Hello from Open2Socks!"
+            read -p "Press Enter to continue..."
+            ;;
+        2)
+            update_script
+            ;;
+        3)
+            echo "Bye!"
+            exit 0
+            ;;
+        *)
+            echo "Invalid option!"
+            sleep 1
+            ;;
+    esac
+}
+
+while true; do
+    main_menu
+done
