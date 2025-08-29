@@ -5,6 +5,9 @@ SETUP_SCRIPT="./setup-vpn.sh"
 CLEANUP_SCRIPT="./cleanup-vpn.sh"
 CONFIG_BASE_DIR="/etc/openvpn/"
 LOG_FILE="./script_debug.log"
+# The script assumes it's installed here by the installer
+INSTALL_DIR="/opt/OpenVPN2Socks"
+EXECUTABLE_NAME="open2socks"
 
 # --- Color Codes ---
 GREEN='\033[0;32m'
@@ -101,6 +104,10 @@ function cleanup_all() {
         echo "---"
         echo "🧹 Deleting all configurations..."
         local all_ports=$(get_configs_array | cut -d'|' -f2)
+        if [ -z "$all_ports" ]; then
+            echo "No configurations to delete."
+            return
+        fi
         for port in $all_ports; do
             echo "---"
             echo "Deleting config for port $port..."
@@ -110,6 +117,34 @@ function cleanup_all() {
         read -p "Press Enter to return to the main menu..."
     fi
 }
+
+function update_script() {
+    echo "🔄 Checking for updates from GitHub..."
+    cd "$INSTALL_DIR" # Go to the installation directory
+    
+    # Fetch the latest changes from the remote repository
+    sudo git fetch
+    
+    # Compare local and remote versions using their commit hashes
+    LOCAL=$(sudo git rev-parse HEAD)
+    REMOTE=$(sudo git rev-parse '@{u}')
+
+    if [ "$LOCAL" = "$REMOTE" ]; then
+        echo -e "${GREEN}👍 You are already on the latest version.${NC}"
+    else
+        echo "📥 New version found. Pulling changes..."
+        # Stash any local changes and pull the latest version
+        sudo git reset --hard HEAD
+        sudo git pull
+        # Make sure permissions are still correct after pulling
+        sudo chmod +x *.sh
+        echo -e "${GREEN}✅ Update successful! Restarting the script...${NC}"
+        # Re-execute the script to apply the changes immediately
+        exec "/usr/local/bin/$EXECUTABLE_NAME"
+    fi
+    read -p "Press Enter to return to the main menu..."
+}
+
 
 # --- Main Logic Functions ---
 
@@ -207,7 +242,8 @@ function display_main_menu() {
     echo "1. Add new OpenVPN Config"
     echo "2. Manage existing configs"
     echo "3. Clean up ALL configurations"
-    echo "4. Exit"
+    echo "4. Update Script"
+    echo "5. Exit"
     echo -e "${BLUE}---${NC}"
 }
 
@@ -227,11 +263,13 @@ function manage_configs() {
         fi
         
         local i=1
+        local config_array=()
         while IFS= read -r config_line; do
             local file_name=$(echo "$config_line" | cut -d'|' -f1)
             local port=$(echo "$config_line" | cut -d'|' -f2)
             local status=$(echo "$config_line" | cut -d'|' -f4)
             echo "$i. File: $file_name | Port: $port | Status: $status"
+            config_array+=("$config_line")
             ((i++))
         done <<< "$configs"
         
@@ -241,15 +279,15 @@ function manage_configs() {
         if [ "$choice" == "q" ]; then
             return
         fi
-
-        local selected_config
-        selected_config=$(echo -e "$configs" | sed -n "${choice}p")
-        if [ -z "$selected_config" ]; then
+        
+        # Validate that choice is a number and within bounds
+        if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#config_array[@]}" ]; then
             error_message "Invalid selection. Please try again."
             sleep 1
             continue
         fi
 
+        local selected_config="${config_array[$choice-1]}"
         local port=$(echo "$selected_config" | cut -d'|' -f2)
         
         while true; do
@@ -263,14 +301,14 @@ function manage_configs() {
             echo "4. Start"
             echo "5. Show Final IP"
             echo "6. Delete this configuration"
-            echo "7. Back to manage menu"
+            echo "7. Back to previous menu"
             echo -e "${BLUE}---${NC}"
             read -p "Enter your choice: " manage_choice
             
             case "$manage_choice" in
                 1)
                     echo "---"
-                    echo "Displaying logs for port $port..."
+                    echo "Displaying logs for port $port... (Press Ctrl+C to stop)"
                     echo "---"
                     sudo journalctl -u "openvpn-socks-$port.service" -f
                     read -p "Press Enter to continue..."
@@ -279,6 +317,7 @@ function manage_configs() {
                     echo "---"
                     echo "Restarting service for port $port..."
                     sudo systemctl restart "openvpn-socks-$port.service"
+                    echo "Service restarted."
                     echo "---"
                     read -p "Press Enter to continue..."
                     ;;
@@ -286,6 +325,7 @@ function manage_configs() {
                     echo "---"
                     echo "Stopping service for port $port..."
                     sudo systemctl stop "openvpn-socks-$port.service"
+                    echo "Service stopped."
                     echo "---"
                     read -p "Press Enter to continue..."
                     ;;
@@ -293,6 +333,7 @@ function manage_configs() {
                     echo "---"
                     echo "Starting service for port $port..."
                     sudo systemctl start "openvpn-socks-$port.service"
+                    echo "Service started."
                     echo "---"
                     read -p "Press Enter to continue..."
                     ;;
@@ -312,7 +353,7 @@ function manage_configs() {
                         sudo "$CLEANUP_SCRIPT" "$port"
                         echo -e "✅ ${GREEN}Configuration deleted successfully.${NC}"
                         read -p "Press Enter to return to main menu..."
-                        return
+                        return 2 # Special return code to break outer loop
                     fi
                     ;;
                 7)
@@ -324,6 +365,10 @@ function manage_configs() {
                     ;;
             esac
         done
+        # Check for the special return code to break the outer loop as well
+        if [[ $? -eq 2 ]]; then
+            break
+        fi
     done
 }
 
@@ -347,6 +392,9 @@ while true; do
             cleanup_all
             ;;
         4)
+            update_script
+            ;;
+        5)
             echo "Exiting. Goodbye!"
             exit 0
             ;;
