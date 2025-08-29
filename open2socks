@@ -467,15 +467,35 @@ function restore_backup() {
     sudo systemctl daemon-reload
 
     echo
-    echo "🔄 Recreating and restarting all OpenVPN SOCKS services..."
+    echo "🔄 Recreating Docker containers and restarting all OpenVPN SOCKS services..."
 
-    # Restart all restored OpenVPN SOCKS systemd units to automatically rebuild Docker containers
     for svc in /etc/systemd/system/openvpn-socks-*.service; do
         [ ! -f "$svc" ] && continue
         port=$(basename "$svc" | sed 's/openvpn-socks-\([0-9]*\)\.service/\1/')
-        echo "Restarting service for port $port ..."
-        sudo systemctl restart "openvpn-socks-$port.service"
+        container="openvpn-socks-$port"
+        config_dir="/etc/openvpn/$port"
+
+        # Remove any previous container (just in case)
+        sudo docker stop "$container" &>/dev/null || true
+        sudo docker rm "$container" &>/dev/null || true
+
+        # Find Docker image from service file, fallback to default if not found
+        image=$(grep -oP "(?<=docker run --rm --name \$?CONTAINER_NAME ).*" "$svc" | awk '{print $NF}')
+        [ -z "$image" ] && image="kizzx2/openvpn-client-socks"
+
+        # Run container manually to be sure it's created
+        sudo docker run -d \
+            --name "$container" \
+            --cap-add=NET_ADMIN \
+            --device=/dev/net/tun \
+            -v "$config_dir":/etc/openvpn:ro \
+            -p "$port":1080 \
+            "$image"
+
+        # Now restart the service (systemd will take over container management)
+        sudo systemctl restart "$container.service"
         sleep 1
+        echo "Restored and started: $container"
     done
 
     echo "Restore complete. All configs and proxies are up and running!"
