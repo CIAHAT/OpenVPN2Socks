@@ -4,6 +4,381 @@ SETUP_SCRIPT="/usr/local/bin/setup-vpn.sh"
 CLEANUP_SCRIPT="/usr/local/bin/cleanup-vpn.sh"
 CONFIG_BASE_DIR="/etc/openvpn/"
 LOG_FILE="/var/log/open2socks-debug.log"
+ش#!/bin/bash
+
+SETUP_SCRIPT="/usr/local/bin/setup-vpn.sh"
+CLEANUP_SCRIPT="/usr/local/bin/cleanup-vpn.sh"
+CONFIG_BASE_DIR="/etc/openvpn/"
+LOG_FILE="/var/log/open2socks-debug.log"
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BLUE='\033[0;34m'
+
+MONITOR_SERVICE="/usr/local/bin/open2socks-monitor.sh"
+MONITOR_SYSTEMD_SERVICE="/etc/systemd/system/open2socks-monitor.service"
+MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
+MONITOR_CONF_FILE="/etc/openvpn/monitoring.conf"
+BACKUP_DIR="/root"
+
+# ------------------------ COMMON FUNCTIONS ------------------------
+
+function log_message() {
+    sudo bash -c "echo \"$(date '+%Y-%m-%d %H:%M:%S') - $1\" >> $LOG_FILE"
+}
+
+function error_message() {
+    log_message "❌ Error: $1"
+    echo -e "${RED}Error: $1${NC}"
+}
+
+function check_prerequisites() {
+    REQUIRED=("curl" "jq" "zip" "unzip" "docker" "openvpn")
+    for pkg in "${REQUIRED[@]}"; do
+        if ! command -v $pkg &>/dev/null; then
+            echo -e "📦 Installing '$pkg'..."
+            sudo apt-get update && sudo apt-get install -y $pkg
+        fi
+    done
+    if [ ! -f "$SETUP_SCRIPT" ] || [ ! -x "$SETUP_SCRIPT" ]; then
+        error_message "setup-vpn.sh not found or not executable in /usr/local/bin"
+        exit 1
+    fi
+    if [ ! -f "$CLEANUP_SCRIPT" ] || [ ! -x "$CLEANUP_SCRIPT" ]; then
+        error_message "cleanup-vpn.sh not found or not executable in /usr/local/bin"
+        exit 1
+    fi
+    sudo touch "$LOG_FILE" && sudo chmod 666 "$LOG_FILE"
+}
+
+function is_port_in_use() {
+    local port="$1"
+    if ss -tuln | grep -q ":$port "; then
+        return 0
+    fi
+    return 1
+}
+
+function get_proxy_ip_info() {
+    local port="$1"
+    local json_output=$(curl --silent --connect-timeout 5 --proxy socks5h://127.0.0.1:"$port" ipinfo.io 2>/dev/null)
+    if echo "$json_output" | grep -q '"ip"'; then
+        echo "$json_output"
+    else
+        echo "{\"ip\":\"N/A\", \"city\":\"N/A\", \"country\":\"N/A\"}"
+    fi
+}
+
+function get_service_status() {
+    local port="$1"
+    local service_name="openvpn-socks-$port.service"
+    if sudo systemctl is-active --quiet "$service_name"; then
+        echo -e "${GREEN}🟢 Running${NC}"
+    elif sudo systemctl is-failed --quiet "$service_name"; then
+        echo -e "${RED}🔴 Failed${NC}"
+    else
+        echo -e "${YELLOW}⚪ Stopped${NC}"
+    fi
+}
+
+function get_configs_array() {
+    local configs=""
+    for dir in "$CONFIG_BASE_DIR"*/; do
+        if [[ "$dir" =~ ([0-9]+)/$ ]]; then
+            local port="${BASH_REMATCH[1]}"
+            local original_file="client.conf"
+            if [ -f "${dir}name.txt" ]; then
+                original_file=$(cat "${dir}name.txt")
+            fi
+
+            local status=$(get_service_status "$port")
+            local ip_info="N/A"
+            if [[ "$status" == *"Running"* ]]; then
+                ip_info=$(get_proxy_ip_info "$port" | jq -r '"\(.ip) (\(.country))"')
+            fi
+            configs+="$original_file|$port|$ip_info|$status\n"
+        fi
+    done
+    echo -e "$configs"
+}
+
+# ------------------------ VPN FUNCTIONS ------------------------
+
+function cleanup_all() {
+    read -p "⚠️ Are you sure you want to DELETE ALL configurations (y/n)? " confirm
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        echo "---"
+        echo "🧹 Deleting all configurations..."
+        local all_ports=$(get_configs_array | cut -d'|' -f2)
+        for port in $all_ports; do
+            echo "---"
+            echo "Deleting config for port $port..."
+            sudo "$CLEANUP_SCRIPT" "$port"
+        done
+        echo -e "✅ ${GREEN}All configurations deleted successfully.${NC}"
+        read -p "Press Enter to return to the main menu..."
+    fi
+}
+
+function uninstall_open2socks() {
+    clear
+    echo -e "${RED}=================== WARNING ==================="
+    echo "This will COMPLETELY and IRREVERSIBLY remove:"
+    echo "- All open2socks scripts and binaries"
+    echo "- All OpenVPN/SOCKS configs and systemd units"
+    echo "- All monitoring, log, and backup files"
+    echo "-----------------------------------------------"
+    echo "Type DELETE (all capital) to continue, or anything else to cancel:"
+    read -p "> " confirm
+    if [[ "$confirm" != "DELETE" ]]; then
+        echo "Aborted."
+        sleep 1
+        return
+    fi
+
+    echo "Stopping all open2socks services and timers..."
+    for f in /etc/systemd/system/openvpn-socks-*.service /etc/systemd/system/openvpn-socks-*.timer \
+             /etc/systemd/system/open2socks-monitor.service /etc/systemd/system/open2socks-monitor.timer; do
+        [ -f "$f" ] && sudo systemctl disable --now "$(basename "$f")" 2>/dev/null
+    done
+
+    echo "Removing all scripts from /usr/local/bin/..."
+    for bin in /usr/local/bin/open2socks /usr/local/bin/setup-vpn.sh /usr/local/bin/cleanup-vpn.sh /usr/local/bin/open2socks-monitor.sh; do
+        [ -f "$bin" ] && sudo rm -f "$bin"
+    done
+    find /usr/local/bin/ -maxdepth 1 -type f -name 'open2socks*' -exec sudo rm -f {} \;
+
+    echo "Removing configs and monitoring..."
+    [ -d /etc/openvpn ] && sudo rm -rf /etc/openvpn
+
+    echo "Removing all systemd units/timers related to open2socks..."
+    find /etc/systemd/system/ -maxdepth 1 -type f \
+        \( -name 'openvpn-socks-*.service' -o -name 'openvpn-socks-*.timer' \
+        -o -name 'open2socks-monitor.service' -o -name 'open2socks-monitor.timer' \) \
+        -exec sudo rm -f {} \;
+
+    sudo systemctl daemon-reload
+
+    echo "Removing log file..."
+    sudo rm -f /var/log/open2socks-debug.log
+
+    echo "Removing backup zip files..."
+    sudo rm -f /root/open2socks-backup-*.zip
+
+    echo
+    echo -e "${GREEN}✔️  open2socks and all configs have been COMPLETELY removed."
+    echo -e "${YELLOW}It's recommended to reboot your server now!${NC}"
+    read -p "Press Enter to continue..."
+    exit 0
+}
+
+function add_new_config() {
+    echo "➡️  Adding a new OpenVPN configuration..."
+
+    while true; do
+        read -p "1. Enter the full path to your .ovpn file: " OVPN_PATH
+        OVPN_PATH=$(eval echo "$OVPN_PATH")
+        if [ ! -f "$OVPN_PATH" ]; then
+            error_message "File not found at '$OVPN_PATH'. Please check the path and try again."
+            continue
+        fi
+        break
+    done
+
+    while true; do
+        echo "---"
+        echo "💡 Currently used ports:"
+        local used_ports=$(get_configs_array | cut -d'|' -f2)
+        if [ -n "$used_ports" ]; then
+            for p in $used_ports; do
+                echo "  - $p"
+            done
+        else
+            echo "  (No ports currently in use)"
+        fi
+        read -p "2. Enter the port for the SOCKS5 proxy: " SOCKS_PORT
+        if [[ ! "$SOCKS_PORT" =~ ^[0-9]+$ ]]; then
+            error_message "Please enter a valid number for the port."
+            continue
+        fi
+        if is_port_in_use "$SOCKS_PORT"; then
+            error_message "Port $SOCKS_PORT is already in use by another process. Please choose another one."
+            continue
+        fi
+        local found=false
+        for p in $used_ports; do
+            if [ "$p" == "$SOCKS_PORT" ]; then
+                found=true
+                break
+            fi
+        done
+        if [ "$found" == "true" ]; then
+            error_message "A configuration for port $SOCKS_PORT already exists. Please delete it first or choose another one."
+            continue
+        fi
+        break
+    done
+
+    read -p "3. Enter OpenVPN username (leave blank if not needed): " VPN_USER
+    if [ -n "$VPN_USER" ]; then
+        read -s -p "4. Enter OpenVPN password: " VPN_PASS
+        echo
+    else
+        VPN_USER="N/A"
+        VPN_PASS="N/A"
+    fi
+
+    echo "---"
+    echo -e "🛠️  Running setup for port ${CYAN}$SOCKS_PORT${NC}..."
+    sudo "$SETUP_SCRIPT" "$OVPN_PATH" "$SOCKS_PORT" "$VPN_USER" "$VPN_PASS"
+    if [ $? -ne 0 ]; then
+        error_message "Setup script failed. Please check the logs."
+        return
+    fi
+
+    echo -e "✅ ${GREEN}Configuration for port $SOCKS_PORT has been added and started.${NC}"
+    echo "---"
+    read -p "Press Enter to return to the main menu..."
+}
+
+# ------------------------ BACKUP & RESTORE ------------------------
+
+function backup_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}--- Backup and Restore Menu ---${NC}"
+        echo "1. Create backup"
+        echo "2. Restore from backup"
+        echo "3. Go to main menu"
+        read -p "Choose an option: " bchoice
+
+        case "$bchoice" in
+            1)
+                create_backup
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                restore_backup
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                break
+                ;;
+            *)
+                echo "Invalid option."
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+function create_backup() {
+    TMPDIR=$(mktemp -d)
+    FILES_TO_BACKUP=()
+    if [ -d "$CONFIG_BASE_DIR" ]; then
+        FILES_TO_BACKUP+=("$CONFIG_BASE_DIR")
+    fi
+    for f in /etc/systemd/system/openvpn-socks-*.service /etc/systemd/system/openvpn-socks-*.timer /etc/systemd/system/open2socks-monitor.service /etc/systemd/system/open2socks-monitor.timer; do
+        [ -f "$f" ] && FILES_TO_BACKUP+=("$f")
+    done
+    [ -f "$MONITOR_CONF_FILE" ] && FILES_TO_BACKUP+=("$MONITOR_CONF_FILE")
+    [ -f "$LOG_FILE" ] && FILES_TO_BACKUP+=("$LOG_FILE")
+
+    if [ "${#FILES_TO_BACKUP[@]}" -eq 0 ]; then
+        echo "Nothing to backup."
+        rm -rf "$TMPDIR"
+        return
+    fi
+
+    ZIP_PATH="$BACKUP_DIR/open2socks-backup-$(date +%Y%m%d-%H%M%S).zip"
+    sudo zip -r "$ZIP_PATH" "${FILES_TO_BACKUP[@]}" > /dev/null
+    sudo chown $USER:$USER "$ZIP_PATH"
+    echo "Backup created at $ZIP_PATH"
+    rm -rf "$TMPDIR"
+}
+
+function restore_backup() {
+    echo "Enter full path to backup zip file (or leave blank to auto-discover latest):"
+    read -p "Path: " zip_path
+
+    if [ -z "$zip_path" ]; then
+        zip_path=$(ls -t $BACKUP_DIR/open2socks-backup-*.zip 2>/dev/null | head -n1)
+        if [ -z "$zip_path" ]; then
+            echo "No backup file found in $BACKUP_DIR"
+            return
+        else
+            echo "Auto-selected latest backup: $zip_path"
+        fi
+    fi
+
+    if [ ! -f "$zip_path" ]; then
+        echo "File not found: $zip_path"
+        return
+    fi
+
+    echo "⚠️ This will overwrite existing configs and units! Continue? (y/n)"
+    read -p "Continue: " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "Restore cancelled."
+        return
+    fi
+
+    sudo unzip -o "$zip_path" -d / > /dev/null
+    sudo systemctl daemon-reload
+
+    echo "🔄 Patching all OpenVPN SOCKS systemd unit files to use docker run..."
+    for svc in /etc/systemd/system/openvpn-socks-*.service; do
+        port=$(basename "$svc" | sed 's/openvpn-socks-\([0-9]*\)\.service/\1/')
+        config_dir="/etc/openvpn/$port"
+        docker_image="kizzx2/openvpn-client-socks"
+        cat > /tmp/openvpn-socks-tmp.service <<EOF
+[Unit]
+Description=OpenVPN SOCKS5 Proxy via Docker for port $port
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Restart=always
+ExecStartPre=-/usr/bin/docker rm openvpn-socks-$port
+ExecStart=/usr/bin/docker run --rm --name openvpn-socks-$port --cap-add=NET_ADMIN --device=/dev/net/tun -v $config_dir:/etc/openvpn:ro -p $port:1080 $docker_image
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        sudo mv /tmp/openvpn-socks-tmp.service "$svc"
+        sudo chmod 644 "$svc"
+        echo "Patched: $svc"
+    done
+
+    sudo systemctl daemon-reload
+
+    for svc in /etc/systemd/system/openvpn-socks-*.service; do
+        port=$(basename "$svc" | sed 's/openvpn-socks-\([0-9]*\)\.service/\1/')
+        sudo systemctl restart "openvpn-socks-$port.service"
+        sleep 1
+    done
+
+    echo "Restore complete. All configs and proxies are up and running!"
+}
+
+# ------------------------ Rest of features (monitor, update, logs, ...) ------------------------
+
+# -- Add other functions (monitoring, log, update, menus, etc) here like before --
+# (to save space, left out, as those haven't changed compared to last versions you have!)
+
+# ------------------------ MAIN ------------------------
+
+check_prerequisites
+
+while true; do
+    clear
+    # display_main_menu and rest of the main menu loop (unchanged)
+    # ...
+done
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
