@@ -8,17 +8,14 @@ GITHUB_API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/
 GITHUB_RAW_BASE="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/"
 
 BIN_DIR="/usr/local/bin"
-SYSTEMD_DIR="/etc/systemd/system"
 
 echo "======================================"
 echo "  Open2Socks Interactive Installer"
 echo "======================================"
 echo
 
-# 1. Install dependencies
-echo "Checking dependencies..."
-
-REQUIRED_PACKAGES=("curl" "jq" "zip" "unzip" "docker.io" "openvpn")
+# 1. Install dependencies (except docker)
+REQUIRED_PACKAGES=("curl" "jq" "zip" "unzip" "openvpn")
 for pkg in "${REQUIRED_PACKAGES[@]}"; do
     if ! dpkg -s "$pkg" &> /dev/null; then
         echo "Installing $pkg..."
@@ -29,7 +26,15 @@ for pkg in "${REQUIRED_PACKAGES[@]}"; do
     fi
 done
 
-# 2. Download all scripts from GitHub repo to /usr/local/bin
+# 2. Install Docker (only if not present)
+if ! command -v docker &> /dev/null; then
+    echo "Docker not found. Installing Docker using the official script..."
+    curl -fsSL https://get.docker.com | sh
+else
+    echo "Docker is already installed."
+fi
+
+# 3. Download all scripts from GitHub repo to /usr/local/bin
 echo
 echo "Downloading all scripts from GitHub..."
 
@@ -43,18 +48,6 @@ done
 
 echo
 echo "All scripts are installed in $BIN_DIR"
-
-# 3. Enable and reload any required systemd services/timers
-if [ -f "$BIN_DIR/open2socks-monitor.sh" ]; then
-    # Optional: create or reload monitor timer if config exists
-    MONITOR_CONF="/etc/openvpn/monitoring.conf"
-    if [ -f "$MONITOR_CONF" ]; then
-        source "$MONITOR_CONF"
-        if [ -n "$MONITOR_INTERVAL" ]; then
-            sudo "$BIN_DIR/open2socks" --setup-monitor-timer "$MONITOR_INTERVAL"
-        fi
-    fi
-fi
 
 echo
 echo "======================================"
