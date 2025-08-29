@@ -192,6 +192,57 @@ function update_script_from_github() {
     exit 0
 }
 
+function setup_restart_timer() {
+    local port="$1"
+    local service_name="openvpn-socks-$port"
+    local timer_service="openvpn-socks-$port-restart"
+    local timer_unit="/etc/systemd/system/${timer_service}.service"
+    local timer_timer="/etc/systemd/system/${timer_service}.timer"
+
+    echo "Enter restart interval in hours (0 to disable scheduled restart):"
+    read -p "Hours: " interval
+    if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
+        echo "Invalid input. Please enter a number."
+        sleep 1
+        return
+    fi
+    if [ "$interval" -eq 0 ]; then
+        sudo systemctl disable --now "${timer_service}.timer" 2>/dev/null
+        sudo rm -f "$timer_unit" "$timer_timer"
+        sudo systemctl daemon-reload
+        echo "Scheduled restart disabled for port $port."
+        sleep 1
+        return
+    fi
+
+    sudo bash -c "cat > '$timer_unit' <<EOF
+[Unit]
+Description=Scheduled restart for $service_name
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart $service_name.service
+EOF"
+
+    sudo bash -c "cat > '$timer_timer' <<EOF
+[Unit]
+Description=Timer for scheduled restart of $service_name
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=${interval}h
+Unit=${timer_service}.service
+
+[Install]
+WantedBy=timers.target
+EOF"
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now "${timer_service}.timer"
+    echo "Scheduled restart every $interval hours is set for port $port."
+    sleep 1
+}
+
 function display_main_menu() {
     echo -e "${BLUE}---${NC}"
     echo -e "${CYAN}VPN Manager - Main Menu${NC}"
@@ -273,8 +324,9 @@ function manage_configs() {
             echo "3. Stop"
             echo "4. Start"
             echo "5. Show Final IP"
-            echo "6. Delete this configuration"
-            echo "7. Back to manage menu"
+            echo "6. Set schedule restart"
+            echo "7. Delete this configuration"
+            echo "8. Back to manage menu"
             echo -e "${BLUE}---${NC}"
             read -p "Enter your choice: " manage_choice
             
@@ -316,6 +368,9 @@ function manage_configs() {
                     read -p "Press Enter to continue..."
                     ;;
                 6)
+                    setup_restart_timer "$port"
+                    ;;
+                7)
                     read -p "⚠️ Are you sure you want to DELETE this configuration (y/n)? " confirm
                     if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
                         echo "---"
@@ -326,7 +381,7 @@ function manage_configs() {
                         return
                     fi
                     ;;
-                7)
+                8)
                     break
                     ;;
                 *)
