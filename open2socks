@@ -3,7 +3,7 @@
 SETUP_SCRIPT="/usr/local/bin/setup-vpn.sh"
 CLEANUP_SCRIPT="/usr/local/bin/cleanup-vpn.sh"
 CONFIG_BASE_DIR="/etc/openvpn/"
-LOG_FILE="./script_debug.log"
+LOG_FILE="/var/log/open2socks-debug.log"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -20,41 +20,35 @@ MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
 MONITOR_CONF_FILE="/etc/openvpn/monitoring.conf"
 
 BACKUP_DIR="/root"
-BACKUP_FILE="open2socks-backup-$(date +%Y%m%d-%H%M%S).zip"
+
+# ------------------------ COMMON FUNCTIONS ------------------------
 
 function log_message() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+    sudo bash -c "echo \"$(date '+%Y-%m-%d %H:%M:%S') - $1\" >> $LOG_FILE"
 }
 
 function error_message() {
     log_message "❌ Error: $1"
+    echo -e "${RED}Error: $1${NC}"
 }
 
 function check_prerequisites() {
+    REQUIRED=("curl" "jq" "zip" "unzip" "docker" "openvpn")
+    for pkg in "${REQUIRED[@]}"; do
+        if ! command -v $pkg &>/dev/null; then
+            echo -e "📦 Installing '$pkg'..."
+            sudo apt-get update && sudo apt-get install -y $pkg
+        fi
+    done
     if [ ! -f "$SETUP_SCRIPT" ] || [ ! -x "$SETUP_SCRIPT" ]; then
-        error_message "setup-vpn.sh not found or not executable. Please make sure it's in /usr/local/bin and has execute permissions."
+        error_message "setup-vpn.sh not found or not executable in /usr/local/bin"
         exit 1
     fi
     if [ ! -f "$CLEANUP_SCRIPT" ] || [ ! -x "$CLEANUP_SCRIPT" ]; then
-        error_message "cleanup-vpn.sh not found or not executable. Please make sure it's in /usr/local/bin and has execute permissions."
+        error_message "cleanup-vpn.sh not found or not executable in /usr/local/bin"
         exit 1
     fi
-    if ! command -v curl &>/dev/null; then
-        echo -e "📦 Installing 'curl'..."
-        sudo apt-get update && sudo apt-get install -y curl
-    fi
-    if ! command -v jq &>/dev/null; then
-        echo -e "📦 Installing 'jq'..."
-        sudo apt-get update && sudo apt-get install -y jq
-    fi
-    if ! command -v zip &>/dev/null; then
-        echo -e "📦 Installing 'zip'..."
-        sudo apt-get update && sudo apt-get install -y zip
-    fi
-    if ! command -v unzip &>/dev/null; then
-        echo -e "📦 Installing 'unzip'..."
-        sudo apt-get update && sudo apt-get install -y unzip
-    fi
+    sudo touch "$LOG_FILE" && sudo chmod 666 "$LOG_FILE"
 }
 
 function is_port_in_use() {
@@ -96,17 +90,19 @@ function get_configs_array() {
             if [ -f "${dir}name.txt" ]; then
                 original_file=$(cat "${dir}name.txt")
             fi
-            
+
             local status=$(get_service_status "$port")
             local ip_info="N/A"
             if [[ "$status" == *"Running"* ]]; then
-                 ip_info=$(get_proxy_ip_info "$port" | jq -r '"\(.ip) (\(.country))"')
+                ip_info=$(get_proxy_ip_info "$port" | jq -r '"\(.ip) (\(.country))"')
             fi
             configs+="$original_file|$port|$ip_info|$status\n"
         fi
     done
     echo -e "$configs"
 }
+
+# ------------------------ VPN FUNCTIONS ------------------------
 
 function cleanup_all() {
     read -p "⚠️ Are you sure you want to DELETE ALL configurations (y/n)? " confirm
@@ -126,7 +122,7 @@ function cleanup_all() {
 
 function add_new_config() {
     echo "➡️  Adding a new OpenVPN configuration..."
-    
+
     while true; do
         read -p "1. Enter the full path to your .ovpn file: " OVPN_PATH
         OVPN_PATH=$(eval echo "$OVPN_PATH")
@@ -179,7 +175,7 @@ function add_new_config() {
         VPN_USER="N/A"
         VPN_PASS="N/A"
     fi
-    
+
     echo "---"
     echo -e "🛠️  Running setup for port ${CYAN}$SOCKS_PORT${NC}..."
     sudo "$SETUP_SCRIPT" "$OVPN_PATH" "$SOCKS_PORT" "$VPN_USER" "$VPN_PASS"
@@ -187,30 +183,10 @@ function add_new_config() {
         error_message "Setup script failed. Please check the logs."
         return
     fi
-    
+
     echo -e "✅ ${GREEN}Configuration for port $SOCKS_PORT has been added and started.${NC}"
     echo "---"
     read -p "Press Enter to return to the main menu..."
-}
-
-function update_script_from_github() {
-    echo -e "${BLUE}Updating all scripts from GitHub...${NC}"
-    GITHUB_USER="CIAHAT"
-    GITHUB_REPO="OpenVPN2Socks"
-    GITHUB_API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/"
-    GITHUB_RAW_BASE="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/"
-
-    file_list=$(curl -s "$GITHUB_API_URL" | jq -r '.[] | select(.type=="file") | .name')
-
-    for FILE in $file_list; do
-        sudo curl -fsSL "$GITHUB_RAW_BASE$FILE" -o "/usr/local/bin/$FILE" \
-          && sudo chmod +x "/usr/local/bin/$FILE" \
-          && echo "✅ Updated $FILE"
-    done
-
-    echo -e "${GREEN}All scripts updated from GitHub! Please re-run open2socks if you want to use the new version.${NC}"
-    read -p "Press Enter to exit and reload the script..."
-    exit 0
 }
 
 function setup_restart_timer() {
@@ -263,6 +239,8 @@ EOF"
     echo "Scheduled restart every $interval hours is set for port $port."
     sleep 1
 }
+
+# ------------------------ MONITORING ------------------------
 
 function monitoring_menu() {
     local status="OFF"
@@ -353,6 +331,8 @@ EOF"
     sudo systemctl daemon-reload
 }
 
+# ------------------------ BACKUP & RESTORE ------------------------
+
 function backup_menu() {
     while true; do
         clear
@@ -383,20 +363,15 @@ function backup_menu() {
 }
 
 function create_backup() {
-    # Compose file lists
     TMPDIR=$(mktemp -d)
     FILES_TO_BACKUP=()
-    # OpenVPN configs
     if [ -d "$CONFIG_BASE_DIR" ]; then
         FILES_TO_BACKUP+=("$CONFIG_BASE_DIR")
     fi
-    # systemd units
     for f in /etc/systemd/system/openvpn-socks-*.service /etc/systemd/system/openvpn-socks-*.timer /etc/systemd/system/open2socks-monitor.service /etc/systemd/system/open2socks-monitor.timer; do
         [ -f "$f" ] && FILES_TO_BACKUP+=("$f")
     done
-    # monitoring config
     [ -f "$MONITOR_CONF_FILE" ] && FILES_TO_BACKUP+=("$MONITOR_CONF_FILE")
-    # log file
     [ -f "$LOG_FILE" ] && FILES_TO_BACKUP+=("$LOG_FILE")
 
     if [ "${#FILES_TO_BACKUP[@]}" -eq 0 ]; then
@@ -443,6 +418,81 @@ function restore_backup() {
     echo "Restore complete. You may need to re-enable services/timers as needed."
 }
 
+# ------------------------ LOG MANAGEMENT ------------------------
+
+function log_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}--- Log Management ---${NC}"
+        echo "1. Show last 100 lines"
+        echo "2. Search in logs"
+        echo "3. Export log file"
+        echo "4. Clear log file"
+        echo "5. Back to main menu"
+        read -p "Choose an option: " lchoice
+
+        case "$lchoice" in
+            1)
+                echo "Last 100 lines of log:"
+                tail -n 100 "$LOG_FILE"
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                read -p "Enter search term: " st
+                grep --color=auto "$st" "$LOG_FILE" || echo "No results found."
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                target="$HOME/open2socks-exported-log-$(date +%Y%m%d-%H%M%S).log"
+                cp "$LOG_FILE" "$target"
+                echo "Exported to $target"
+                read -p "Press Enter to continue..."
+                ;;
+            4)
+                read -p "Are you sure you want to clear the log file? (y/n): " confirm
+                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+                    sudo truncate -s 0 "$LOG_FILE"
+                    echo "Log file cleared."
+                else
+                    echo "Cancelled."
+                fi
+                sleep 1
+                ;;
+            5)
+                break
+                ;;
+            *)
+                echo "Invalid option."
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+# ------------------------ UPDATE SCRIPT ------------------------
+
+function update_script_from_github() {
+    echo -e "${BLUE}Updating all scripts from GitHub...${NC}"
+    GITHUB_USER="CIAHAT"
+    GITHUB_REPO="OpenVPN2Socks"
+    GITHUB_API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/"
+    GITHUB_RAW_BASE="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/"
+
+    file_list=$(curl -s "$GITHUB_API_URL" | jq -r '.[] | select(.type=="file") | .name')
+
+    for FILE in $file_list; do
+        sudo curl -fsSL "$GITHUB_RAW_BASE$FILE" -o "/usr/local/bin/$FILE"
+        sudo chmod +x "/usr/local/bin/$FILE"
+        echo "✅ Updated $FILE"
+    done
+
+    echo -e "${GREEN}All scripts updated from GitHub! Please re-run open2socks if you want to use the new version.${NC}"
+    read -p "Press Enter to exit and reload the script..."
+    exit 0
+}
+
+# ------------------------ MENUS ------------------------
+
 function display_main_menu() {
     echo -e "${BLUE}---${NC}"
     echo -e "${CYAN}VPN Manager - Main Menu${NC}"
@@ -470,8 +520,9 @@ function display_main_menu() {
     echo "3. Clean up ALL configurations"
     echo "4. Monitoring settings"
     echo "5. Backup and Restore"
-    echo "6. Update script from GitHub"
-    echo "7. Exit"
+    echo "6. Log management"
+    echo "7. Update script from GitHub"
+    echo "8. Exit"
     echo -e "${BLUE}---${NC}"
 }
 
@@ -489,7 +540,7 @@ function manage_configs() {
             read -p "Press Enter to return to the main menu..."
             return
         fi
-        
+
         local i=1
         while IFS= read -r config_line; do
             local file_name=$(echo "$config_line" | cut -d'|' -f1)
@@ -498,10 +549,10 @@ function manage_configs() {
             echo "$i. File: $file_name | Port: $port | Status: $status"
             ((i++))
         done <<< "$configs"
-        
+
         echo -e "${BLUE}---${NC}"
         read -p "Select a number to manage, or 'q' to go back: " choice
-        
+
         if [ "$choice" == "q" ]; then
             return
         fi
@@ -515,7 +566,7 @@ function manage_configs() {
         fi
 
         local port=$(echo "$selected_config" | cut -d'|' -f2)
-        
+
         while true; do
             clear
             echo -e "${BLUE}---${NC}"
@@ -531,13 +582,13 @@ function manage_configs() {
             echo "8. Back to manage menu"
             echo -e "${BLUE}---${NC}"
             read -p "Enter your choice: " manage_choice
-            
+
             case "$manage_choice" in
                 1)
                     echo "---"
                     echo "Displaying logs for port $port..."
                     echo "---"
-                    sudo journalctl -u "openvpn-socks-$port.service" -f
+                    sudo journalctl -u "openvpn-socks-$port.service" -n 50
                     read -p "Press Enter to continue..."
                     ;;
                 2)
@@ -595,6 +646,8 @@ function manage_configs() {
     done
 }
 
+# ------------------------ MAIN ------------------------
+
 check_prerequisites
 
 while true; do
@@ -619,9 +672,12 @@ while true; do
             backup_menu
             ;;
         6)
-            update_script_from_github
+            log_menu
             ;;
         7)
+            update_script_from_github
+            ;;
+        8)
             echo "Exiting. Goodbye!"
             exit 0
             ;;
