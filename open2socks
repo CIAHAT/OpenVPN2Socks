@@ -13,7 +13,7 @@ CYAN='\033[0;36m'
 MAGENTA='\033[0;35m'
 BLUE='\033[0;34m'
 
-# Monitoring vars (default values)
+# Monitoring vars
 MONITOR_SERVICE="/usr/local/bin/open2socks-monitor.sh"
 MONITOR_SYSTEMD_SERVICE="/etc/systemd/system/open2socks-monitor.service"
 MONITOR_SYSTEMD_TIMER="/etc/systemd/system/open2socks-monitor.timer"
@@ -342,7 +342,7 @@ Unit=open2socks-monitor.service
 WantedBy=timers.target
 EOF"
 
-    sudo chmod +x "$MONITOR_SERVICE"
+    sudo chmod +x "$MONITOR_SERVICE" 2>/dev/null
     sudo systemctl daemon-reload
 }
 
