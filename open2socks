@@ -184,19 +184,22 @@ function add_new_config() {
 
 function update_script_from_github() {
     echo -e "${BLUE}Updating all scripts from GitHub...${NC}"
-    FILES=("open2socks" "setup-vpn.sh" "cleanup-vpn.sh" "open2socks-monitor.sh")
-    GITHUB_BASE="https://raw.githubusercontent.com/CIAHAT/OpenVPN2Socks/main"
+    GITHUB_USER="CIAHAT"
+    GITHUB_REPO="OpenVPN2Socks"
+    GITHUB_API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/"
+    GITHUB_RAW_BASE="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/"
 
-    for FILE in "${FILES[@]}"; do
-        sudo curl -fsSL "$GITHUB_BASE/$FILE" -o "/usr/local/bin/$FILE" \
+    # Fetch list of scripts in repo's root (non-recursive)
+    file_list=$(curl -s "$GITHUB_API_URL" | jq -r '.[] | select(.type=="file") | .name')
+
+    for FILE in $file_list; do
+        sudo curl -fsSL "$GITHUB_RAW_BASE$FILE" -o "/usr/local/bin/$FILE" \
           && sudo chmod +x "/usr/local/bin/$FILE" \
           && echo "✅ Updated $FILE"
     done
 
-    # Systemd service and timer are managed from within the script
-
     echo -e "${GREEN}All scripts updated from GitHub! Please re-run open2socks if you want to use the new version.${NC}"
-    read -p "Press Enter to exit and reload the script..." 
+    read -p "Press Enter to exit and reload the script..."
     exit 0
 }
 
